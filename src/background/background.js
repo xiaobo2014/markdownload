@@ -366,6 +366,24 @@ function generateValidFileName(title, disallowedChars = null) {
   return name;
 }
 
+// Some image hosts send binary images as text/plain. Browsers may then append
+// .txt to the download, so use the file signature instead of trusting that header.
+async function normalizeImageBlob(blob) {
+  const header = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob.slice(0, 12));
+  });
+  const matches = (bytes, offset = 0) => bytes.every((byte, i) => header[offset + i] === byte);
+  let type;
+  if (matches([137, 80, 78, 71, 13, 10, 26, 10])) type = 'image/png';
+  else if (matches([255, 216, 255])) type = 'image/jpeg';
+  else if (matches([71, 73, 70, 56, 55, 97]) || matches([71, 73, 70, 56, 57, 97])) type = 'image/gif';
+  else if (matches([82, 73, 70, 70]) && matches([87, 69, 66, 80], 8)) type = 'image/webp';
+  return type && type !== blob.type ? blob.slice(0, blob.size, type) : blob;
+}
+
 async function preDownloadImages(imageList, markdown) {
   const options = await getOptions();
   let newImageList = {};
@@ -380,8 +398,9 @@ async function preDownloadImages(imageList, markdown) {
         xhr.open('GET', src);
         xhr.responseType = "blob";
         xhr.onload = async function () {
+          try {
           // here's the returned blob
-          const blob = xhr.response;
+          const blob = await normalizeImageBlob(xhr.response);
 
           if (options.imageStyle == 'base64') {
             var reader = new FileReader();
@@ -396,7 +415,7 @@ async function preDownloadImages(imageList, markdown) {
             let newFilename = filename;
             if (newFilename.endsWith('.idunno')) {
               // replace any unknown extension with a lookup based on mime type
-              newFilename = filename.replace('.idunno', '.' + mimedb[blob.type]);
+              newFilename = filename.replace(/\.idunno$/, '.' + (mimedb[blob.type] || 'bin'));
 
               // and replace any instances of this in the markdown
               // remember to url encode for replacement if it's not an obsidian link
@@ -417,6 +436,9 @@ async function preDownloadImages(imageList, markdown) {
             // resolve this promise now
             // (the file might not be saved yet, but the blob is and replacements are complete)
             resolve();
+          }
+          } catch (error) {
+            reject(error);
           }
         };
         xhr.onerror = function () {
